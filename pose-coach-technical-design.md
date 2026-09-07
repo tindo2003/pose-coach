@@ -28,11 +28,149 @@ Every term in this document that isn't standard software engineering. Defined on
 
 **Fine-tuning.** Continuing to train a model on your own examples so it internalises them permanently, rather than being shown examples in each request. Requires thousands of labelled examples and pins you to one model version. Out of scope — see PRD §12 for the full reasoning and the conditions that would change it.
 
+**Surface measurement.** Both iPhone and Android can measure flat surfaces in front of the camera, using frameworks already built into the operating system (ARKit and ARCore — the same ones behind furniture-preview apps). As the camera moves slightly, the phone compares what shifted between frames; nearby things shift more than distant ones, which is how it works out distance. When enough points sit on a common flat surface, it reports that surface with real measurements: flat-side-up or upright, size in metres, distance away, and height off the ground in centimetres.
+
+A bench arrives as something like *flat-side-up, 44cm off the ground, 1.4m × 0.45m, 2.3m away.* Measured, not guessed. On the phone, continuously, at no cost.
+
+Three limits, all of which matter here. It doesn't know what anything **is** — a flat surface 44cm up could be a step, a planter, a bin lid or a car bonnet. It only finds **flat** surfaces, so a railing never appears, being a thin pipe. And it needs visible detail to compare between frames, so a blank wall in flat light gives it nothing.
+
 **The gate.** Weeks 2–3 of §13: the measurement that decides whether the model is good enough at this task to be worth building an app around. It is pass/fail. Roughly two-thirds of the total work sits behind it and is not started until it passes. Where the timeline says an artifact is **required to run the eval**, it means the measurement cannot be performed without it, so it must exist beforehand; **not required until the app** means it can wait, and should.
 
 ---
 
-## 1. System overview
+## 1. Design options
+
+There are three jobs in this system, and every option below is a different answer to who does which.
+
+| Job | What it means |
+|---|---|
+| **Perception** | What is physically here, how big is it, how high, where's the light |
+| **Selection** | Given all that, which pose should the person strike |
+| **Language** | Write the sentence the photographer says out loud |
+
+The AI is unambiguously good at language, decent at selection, and weak at perception — it has no way to measure anything and works from a rough sense of how big things usually are. That weakness is the reason the options exist.
+
+### The four options
+
+| | Perception | Selection | Language | Calls while in use |
+|---|---|---|---|---|
+| **A** | AI estimates | AI | AI, written per scene | 1 |
+| **B** | Phone measures, AI interprets | AI | AI, written per scene | 1 |
+| **C** | Phone measures | Your rules | AI, written per scene | 1 |
+| **D** | Phone measures | Your rules | Pre-written, one per pose | 0 |
+
+---
+
+#### Option A — AI does everything
+
+Send one photograph, get back three poses with sentences. Nothing else runs.
+
+**Pros**
+- Simplest thing that could work. One call, no sensors, no rules to maintain.
+- Behaves identically on every phone, including old and low-end ones.
+- Nothing to build beyond what this document already specifies.
+- Handles anything in a scene, including things you never anticipated — a fire escape, a stack of crates, a fallen tree.
+
+**Cons**
+- It is guessing at size, and this is the failure to expect most. A ledge that's too narrow to sit on, a railing at chest height treated as hip height.
+- Also guessing at where things are in the frame, which is what places the silhouette. §9.2 exists to find out how often those coordinates are invented.
+- Every recommendation needs signal. No signal, no cards.
+
+---
+
+#### Option B — Phone measures, AI does the rest
+
+Identical to A, except the phone measures the flat surfaces it can see before the photo goes out, and one line of text goes along with it: *"measured surfaces: flat-side-up, 44cm high, at frame position (0.5, 0.7); upright, 2.1m tall, at (0.1–0.4)."*
+
+The AI still decides everything. It has just stopped guessing at height.
+
+**Pros**
+- Directly attacks the failure most likely to dominate.
+- Still one call. Measuring is free, on-device, already built into the phone.
+- Real heights in centimetres replace the estimation trick in §6.1, so silhouette scaling gets more accurate too.
+- Same code as A plus one line in the request — you can test both in the same week without committing.
+
+**Cons**
+- The phone reports geometry, not meaning. A 44cm flat surface could be a step or a bin lid, so the AI still has to work out what it's looking at.
+- Railings, ledges and posts never get measured, because they aren't flat surfaces — and those are among the better things to pose against.
+- Needs visible surface detail and reasonable light. A plain wall in flat light returns nothing.
+- Two code paths for old phones without good support, or a raised minimum OS version.
+
+---
+
+#### Option C — Your rules pick the pose, AI writes the words
+
+The phone measures. Your own code decides which pose, using rules you wrote:
+
+```
+flat-side-up, 40–55cm high, at least 40cm deep   → seated poses
+upright, taller than a person, wide enough        → leaning poses
+flat-side-up, 85–105cm high                       → perching poses
+nothing found                                     → standing poses
+```
+
+The AI never chooses. It takes the pose your code picked and writes a sentence for this particular spot — *"sit on the second step, look toward the water."*
+
+**Pros**
+- When it picks something wrong you can read your own rules and see exactly why. Nothing to debug by re-reading a prompt and guessing.
+- Selection is deterministic: same scene, same answer, every time.
+- The AI is confined to writing sentences, which is the one job it's clearly good at.
+- Cheaper per call, since the request is smaller and the reply is shorter.
+
+**Cons**
+- You have to write and tune the rules yourself, and they're rigid. Real places don't sort neatly into buckets.
+- Inherits every blind spot of the measuring: no railings, nothing on plain walls, nothing in poor light.
+- Loses the AI's ability to notice something you never thought of.
+- More total code than A or B, and the rules need maintaining as you learn.
+
+---
+
+#### Option D — No AI while you're using it
+
+Same as C, but the sentences were written once in Week 1, one per pose. The phone measures, the rules pick, the app shows a sentence you already wrote.
+
+**Pros**
+- Instant. No waiting at all, so the whole scene-lock and dead-time design becomes unnecessary.
+- Free to run. No API bill that grows with users.
+- Works with no signal — and good photo spots are frequently places with bad reception.
+- Nothing leaves the phone, so the privacy story is one sentence long.
+- By far the least code.
+
+**Cons**
+- The sentence can't mention anything about where you actually are. "Sit on the step" rather than "sit on the second step, look toward the water." Whether that difference matters is the open question below.
+- Entirely limited to the 30 poses and the situations your rules cover.
+- Still inherits every blind spot of the measuring.
+- No path to getting better except shooting more poses and writing more rules.
+
+---
+
+### What this document specifies
+
+**This document specifies Option A, and treats B as the expected upgrade.** The reason is sequencing rather than conviction: A is the only option testable in Week 2 with nothing but a prompt and a folder of photographs, and its results tell you whether any of the others are needed.
+
+Sections that change by option:
+
+| Section | A | B | C | D |
+|---|---|---|---|---|
+| §2 Client pipeline | as written | add surface measurement at lock | same as B | same as B |
+| §4.2 Prompt | as written | add measured-surfaces line | selection instructions removed | not used |
+| §4.3 Filter | seven rules | rules 1, 2, 6 become checks against measurement | mostly unnecessary | not used |
+| §6.1 Scale | estimate height from box size | use the measured height | same as B | same as B |
+| §3 Proxy | as written | as written | smaller request | **deleted entirely** |
+
+### How to choose
+
+Both decisions come out of the eval you are already running in Weeks 2–3. Neither needs extra infrastructure.
+
+**Decision 1 — is perception the bottleneck?** Read the failure breakdown by class. If most bad cards are wrong about size or about where things are, A is not good enough on its own and B is the move. If most bad cards are about which pose was chosen or how the sentence reads, measuring won't help and the choice is between A and C.
+
+**Decision 2 — do scene-specific sentences actually beat generic ones?** For the 20 spots in the final test, produce both versions: the AI's sentence for that spot, and the plain pre-written one for the same pose. Photograph both, judge both blind.
+
+This is the decision that matters most, because **if generic sentences win or tie, Option D is available** — and D is a dramatically simpler product than anything else on this list. It is worth explicitly hoping for.
+
+---
+
+## 1b. System overview — Option A
 
 Three components. No database, no user accounts, no persistent server state.
 
@@ -63,13 +201,17 @@ Three components. No database, no user accounts, no persistent server state.
                             ▼
 ┌─────────────────────────────────────────────┐
 │ Proxy (single serverless function)          │
-│  validate → call VLM → schema check         │
-│  → grounding filter → backfill → respond    │
+│  validate → call model → check response     │
+│  → filter bad cards → backfill → respond    │
 └─────────────────────────────────────────────┘
                             │
                             ▼
-                  Frontier VLM provider
+                    Model provider API
 ```
+
+Under Option B, one box is added on the client — a surface measurer running alongside the stability detector, whose output joins the request. Nothing else in the diagram changes.
+
+Under Option D, everything below the client disappears.
 
 **Asset bundle** ships with the app: 30 silhouette outlines, their metadata, and 3 fallback poses. Total under 500KB.
 
@@ -395,6 +537,8 @@ The one piece of real geometry in the system.
 
 ### 6.1 Scale — primary path
 
+**Under Options B, C and D this section is unnecessary** — the phone measured the surface, so the real height in centimetres is already known and goes straight into the arithmetic below in place of `H_REAL`. What follows is the Option A estimation, which exists only because the AI cannot measure.
+
 When the card names a support object with a known height class, the bbox gives a metric reference at roughly the subject's depth.
 
 ```
@@ -557,6 +701,12 @@ at_least_one_good_per_scene = mean(any(good(c) for c in scene) for scene in scen
 # DISTRIBUTION — the point of the primary metric
 histogram(sum(good(c) for c in scene) for scene in scenes)   # buckets 0,1,2,3
 
+# OPTION DECISION — see §1
+# If size and location errors dominate, Option A is not enough on its own
+# and Option B is the move. If selection and wording dominate, measuring
+# won't help.
+perception_share = (n_failed_feasible + n_bbox_disagree) / n_failed_total
+
 # DIAGNOSTIC ONLY
 per_card_accuracy = mean(good(c) for all c)
 failure_by_class  = counts of each of the five classes
@@ -579,9 +729,7 @@ The four checkboxes can all be satisfied by directions that produce boring photo
 
 Run this first. It costs nothing and it is the fastest way to learn the idea doesn't work.
 
-**Baseline 2 — a human directing on the spot.** At each of the 20 locations, direct a person yourself and take the photograph, *before* looking at what the model produced for that scene. Then follow the model's direction and take a second photograph.
-
-**This on-the-spot step is required, and the reason is a trap worth naming.** The obvious approach is to compare against the 30 reference photographs from Week 1. That comparison is close to meaningless, because those were shot at the reference locations and the model's were shot at the eval locations. Any difference could be the locations rather than the directions. Only matched pairs at identical locations, same light, same day, same subject, isolate the variable being tested.
+**Baseline 2 — a human directing on the spot.** At each of the 20 locations, direct a person yourself and take the photograph, *before* looking at what the model produced for that scene. Then follow the model's direction and take a second photograph.**This on-the-spot step is required, and the reason is a trap worth naming.** The obvious approach is to compare against the 30 reference photographs from Week 1. That comparison is close to meaningless, because those were shot at the reference locations and the model's were shot at the eval locations. Any difference could be the locations rather than the directions. Only matched pairs at identical locations, same light, same day, same subject, isolate the variable being tested.
 
 The Week 1 photographs are the wrong instrument here. They exist to supply the sentences, not to serve as a comparison set.
 
@@ -590,6 +738,20 @@ The Week 1 photographs are the wrong instrument here. They exist to supply the s
 **Judging.** Strip context, pair the photographs, show them to 15 people who weren't present, ask which one they'd rather have of themselves. Do not judge your own.
 
 **Result:** win over Baseline 1 is mandatory. Parity with Baseline 2 is the target; losing narrowly to a human directing in person is acceptable, because the human isn't in the product.
+
+### 9.6 The sentence-specificity test — decides Option D
+
+Run alongside §9.5, at the same 20 locations, for no extra travel.
+
+For each location, take a **third** photograph directed by the **plain pre-written sentence** for that same pose — the generic one from the reference set, with nothing specific to the location in it. So at each spot you have the AI's *"sit on the second step, elbows on your knees, look toward the water"* and the generic *"sit on the step, elbows on your knees, lean forward a bit."*
+
+Judge blind, same 15 raters, same question.
+
+**Why this is the most consequential measurement in the project.** If the generic sentence wins or ties, the AI is contributing nothing on the live path, and **Option D becomes available** — no calls, no waiting, no API bill, works with no signal, and about a third of the code. That is a dramatically better product on every axis except one.
+
+If the specific sentence wins clearly, the AI stays, and the only remaining question is where the measurements come from — Option A or B.
+
+It is worth explicitly hoping the generic sentence wins.
 
 ---
 
@@ -774,7 +936,10 @@ Once the webpage score clears, go outside.
 
 1. **Direct a person yourself first, before looking at the model's answer**, and take that photograph.
 2. Then follow the model's direction and take a second photograph.
-3. Separately, pick a pose at random from the 30 that fits that spot's support type, and take a third.
+3. Then follow the **plain pre-written sentence** for that same pose — the generic one, with nothing about the location in it — and take a third.
+4. Separately, pick a pose at random from the 30 that fits that spot's support type, and take a fourth.
+
+Photo 3 is what decides whether you need an AI in the app at all (§9.6). If the generic sentence does as well as the AI's location-specific one, **Option D** in §1 becomes available: no calls, no waiting, no bill, works with no signal, a third of the code.
 
 The first-before-looking part matters, and so does doing it on location. The obvious shortcut — comparing against the 30 reference photographs from Week 1 — is close to worthless, because those were taken somewhere else. Any difference could be the location rather than the direction. **Only matched pairs at the same spot, same light, same day, same person, isolate what you are testing.**
 
@@ -791,6 +956,14 @@ Then strip context, pair them up, and show them to 15 people who weren't there. 
 Parity with the on-the-spot human is the target. Losing narrowly to a person directing in the room is fine; that person isn't in the product.
 
 **If it fails:** sound geometry but weak sentences → reshoot the reference set, swap the six examples, rerun. That's an afternoon. Sound sentences that still make dull photographs → the concept is weaker than hoped and no app work fixes it. **Do not start Week 4 on a near miss.**
+
+**You also leave these two weeks having chosen an option from §1**, which determines what Weeks 4–7 actually build:
+
+| What the results showed | Build |
+|---|---|
+| Generic sentences did as well as location-specific ones | **Option D.** Delete the server entirely. Weeks 4–5 become writing the rules table instead of a proxy, and the app gets simpler. |
+| Location-specific sentences won, and size errors dominated the failures | **Option B.** As specced, plus surface measurement at scene lock and one extra line in the request. |
+| Location-specific sentences won, and failures were about pose choice or wording | **Option A.** Build exactly what this document specifies. |
 
 ---
 
