@@ -4,6 +4,34 @@ Companion to the PRD. The PRD says what and why; this says how. Where the two di
 
 ---
 
+## 0. Terminology
+
+Every term in this document that isn't standard software engineering. Defined once here, used plainly everywhere else.
+
+**Vision-language model.** A model that accepts an image and text together in one request and returns text. You send a JPEG plus a written instruction; it replies. It is not something we train or host — it is a third-party HTTP API, the way Stripe is. Written as "the model" throughout.
+
+**Prompt.** The written instruction sent alongside the image. It is a plain-text file. Editing it changes behaviour with no code change and no deploy, which is why it lives in server config rather than the app binary (§3.4).
+
+**Examples in the prompt.** Sample outputs pasted into the prompt so the model matches their style. Our six hand-written direction sentences are there for this reason. It is not training — it is showing the model what "good" looks like inside the request itself, and it costs nothing but a few hundred words per call. This is the mechanism that keeps sentences short and speakable, and it's why the reference set's sentences matter even though we no longer look poses up from a library.
+
+**Schema-constrained response.** Every major provider lets you attach a JSON Schema to the request and guarantees the reply conforms to it. Not a suggestion in the prompt — enforced during generation. This is why §4.1's schema is load-bearing: `support_height` cannot come back as `"about a metre"` when the schema says it's an enum of five values. Format is solved; we never write a parser for prose.
+
+**Temperature.** A number, roughly 0 to 1, controlling how much the model varies its output. Near 0 makes it near-deterministic; higher makes it explore. We use 0.7 because one request must return three *different* poses, and a near-deterministic model tends to return one idea worded three ways.
+
+**Hallucination.** The model stating something false with the same confidence as something true — here, describing a railing that isn't in the photograph, or returning coordinates for an object it invented. It is the dominant correctness risk in this system, and §4.3's filter exists entirely to catch it before a card reaches the screen.
+
+**Grounded / ungrounded.** A card is *grounded* if the object it names is actually visible in the photograph, and the coordinates it gives actually contain that object. *Ungrounded* means it isn't. This is the property §4.3 checks and §9.2 measures.
+
+**Tokens.** The billing and size unit for these APIs. An image consumes tokens proportional to its pixel dimensions, so image size drives both cost and latency directly. This is the reason we upload at 768px rather than full resolution (§2.4).
+
+**Object-detection model.** A separate, specialised model that takes a photograph and a word ("railing") and returns a box around that object. More accurate at coordinates than a general vision-language model, but it's a second dependency. Grounding DINO is one such model. §9.2 decides whether we need one; the answer is "only if the measurement says so."
+
+**Fine-tuning.** Continuing to train a model on your own examples so it internalises them permanently, rather than being shown examples in each request. Requires thousands of labelled examples and pins you to one model version. Out of scope — see PRD §12 for the full reasoning and the conditions that would change it.
+
+**The gate.** Weeks 2–3 of §13: the measurement that decides whether the model is good enough at this task to be worth building an app around. It is pass/fail. Roughly two-thirds of the total work sits behind it and is not started until it passes. Where the timeline says an artifact is **required to run the eval**, it means the measurement cannot be performed without it, so it must exist beforehand; **not required until the app** means it can wait, and should.
+
+---
+
 ## 1. System overview
 
 Three components. No database, no user accounts, no persistent server state.
@@ -101,7 +129,7 @@ Request that frame's higher-resolution counterpart from the capture stream if th
 - Strip all EXIF, including GPS
 - Expected payload 60–100KB
 
-768px is sufficient to identify a railing and localise it, and materially cheaper than full resolution in both latency and tokens. If eval shows bbox precision is resolution-bound, revisit — that's a one-constant change.
+768px is enough to identify a railing and locate it in the frame, and much cheaper than full resolution in both latency and API cost, since these providers bill images by pixel dimensions. If the eval shows box precision is limited by resolution, revisit — that's a one-constant change.
 
 ### 2.5 IMU sampling
 
@@ -209,8 +237,8 @@ Per `install_id`: 60 requests/hour, 400/day. Well above realistic use (a session
 
 ### 3.4 Provider call
 
-- Structured output via the provider's schema-constrained mechanism, not a "return JSON only" instruction
-- `temperature: 0.7` — three cards from one call need genuine spread; near-zero produces three rewordings of one idea
+- Attach the §4.1 JSON Schema to the request so the provider enforces the response shape during generation. Do not instead write "return JSON only" in the prompt and hope — that is the difference between reliable parsing and writing a fence-stripper.
+- `temperature: 0.7` — the setting that controls output variability. One request has to produce three genuinely different poses; near-zero makes the model return one idea worded three ways.
 - 8s hard timeout, one retry on 5xx or timeout, then fallback
 - Model id and prompt version pinned in config, changeable without an app release
 
@@ -316,7 +344,7 @@ Runs server-side after schema validation. Each predicate drops the card.
 | # | Predicate | Catches |
 |---|---|---|
 | 1 | `x2 > x1 + 0.02` and `y2 > y1 + 0.02` | Degenerate boxes |
-| 2 | `0.003 < bbox_area < 0.85` | Whole-frame or pinpoint boxes, both hallucination tells |
+| 2 | `0.003 < bbox_area < 0.85` | Whole-frame or pinpoint boxes. Both are signs the model invented the object rather than found it. |
 | 3 | `subject_anchor` within bbox expanded by 0.15, unless `support_height == "none"` | Anchor unrelated to the object it names |
 | 4 | `word_count(direction) <= 15` | Register drift |
 | 5 | `pose_id` unique within the response | Diversity, enforced mechanically rather than trusted |
@@ -471,7 +499,7 @@ Opt-in, disclosed at first run. Events are small and contain no imagery.
 
 `photo_kept` fires on a delayed sweep of the camera roll for images taken in-session, checked once on next launch. This is the event that matters most and it cannot be captured at shutter time.
 
-**This schema is the fine-tuning dataset.** Per PRD §12, the preference pairs — which card was tapped, which were shown and ignored, whether a photo followed, whether it survived — cannot be retrofitted. Log from the first build even though training is at minimum a year out. Store the derived record; never the photograph.
+**This schema is the training dataset, if there is ever a training phase.** Per PRD §12, the record of which card was tapped, which were shown and ignored, whether a photo followed, and whether it survived cannot be reconstructed after the fact. Log it from the first build even though any training is at minimum a year out. Store the derived record; never the photograph.
 
 ---
 
@@ -501,9 +529,9 @@ Automated, no human. For each card, a second independent call:
  Answer with a short noun phrase, or 'nothing identifiable'."
 ```
 
-Agreement is a fuzzy string match against `support_object`. Disagreement rate is the hallucinated-coordinates metric. Coarse-but-correct boxes still agree; confabulated ones don't.
+Agreement is a fuzzy string match against `support_object`. The disagreement rate measures how often the model invents coordinates. The distinction it draws matters: a box that is roughly right but sloppy still agrees, because the object really is in there; a box for an object that was never in the photograph does not.
 
-This is what decides whether a dedicated grounding model is needed. Only if disagreement is high does Grounding DINO enter the design — it reintroduces a second model into a deliberately flat stack, so it needs evidence.
+This decides whether a separate object-detection model is needed to supply coordinates. Only if disagreement is high does one enter the design — it adds a second model dependency to a deliberately simple stack, so it needs evidence first.
 
 ### 9.3 Human rating
 
@@ -579,7 +607,7 @@ Client constants ship in the binary for the first build. If tuning proves noisy,
 - One 768px frame per scene lock leaves the device. Nothing else does.
 - The photograph the user takes never leaves the device.
 - EXIF stripped, including GPS, before upload.
-- Proxy retains no image bytes and no image-derived cache. Provider retention is whatever the provider's zero-retention or standard policy specifies; select and document it.
+- Proxy retains no image bytes and no image-derived cache. The model provider's own retention policy applies to what we send them; most offer a no-retention tier. Pick one explicitly and write down which.
 - `install_id` is a random UUID for rate limiting, not an advertising or device identifier.
 - Telemetry carries a dHash, which is not invertible to an image.
 - API key server-side only.
@@ -589,7 +617,7 @@ Client constants ship in the binary for the first build. If tuning proves noisy,
 
 ## 12. Open technical questions
 
-**Is 768px enough for usable bbox precision?** §9.2 answers it. If not, the first move is 1024px, which roughly doubles image tokens.
+**Is 768px enough for usable box precision?** §9.2 answers it. If not, the first move is 1024px, which roughly doubles the per-image API cost.
 
 **Does `cos(Δpitch)` hold well enough?** Eyeball validation in step 3. Replacement is a measured lookup table from the reference set, not a more elaborate projection model.
 
@@ -601,7 +629,7 @@ Client constants ship in the binary for the first build. If tuning proves noisy,
 
 ## 13. Timeline
 
-Assumes one engineer working evenings and weekends, roughly 15 hours a week. A full-time pair would compress this to about three weeks but would not change the ordering, because the gate is a measurement, not a build.
+Assumes one engineer working evenings and weekends, roughly 15 hours a week. A full-time pair would compress this to about three weeks but would not change the ordering, because Weeks 2–3 are a measurement, not a build — they take as long as they take regardless of headcount.
 
 ### Week 0 — Smoke test
 
@@ -609,7 +637,7 @@ Assumes one engineer working evenings and weekends, roughly 15 hours a week. A f
 
 Walk a few blocks, photograph ten scenes, paste them into a chat with a first draft of the §4.2 prompt. Read the output.
 
-No code. The purpose is to find out which of the five failure classes dominates before committing to a design that assumes a particular one. If ungrounded references dominate, the grounding filter matters most. If infeasibility dominates, the prompt's feasibility paragraph needs the most work. If the sentences read like a photography manual, few-shot is the lever.
+No code. The purpose is to find out which of the five failure classes dominates before committing to a design that assumes a particular one. If it mostly names objects that aren't there, the §4.3 filter matters most. If the objects are real but the wrong size to use, the prompt's feasibility paragraph needs the most work. If the sentences read like a photography manual, the fix is the style examples in the prompt.
 
 **Exit:** a rough sense of the dominant failure mode, and a prompt worth running at scale.
 
@@ -617,60 +645,82 @@ No code. The purpose is to find out which of the five failure classes dominates 
 
 ### Week 1 — Reference set and harness, in parallel
 
-**Track A — shoot and trace, ~10 hours.**
+Each artifact below is tagged with where it gets consumed. Two of them are required before the eval can run at all; two are not needed until the app is built. That difference changes the schedule.
 
-| | |
+**Track A1 — shoot and write, ~5 hours. Required to run the eval.**
+
+| Artifact | Consumed by |
 |---|---|
-| Shoot the 30 | One afternoon. Six locations, log pitch and distance per frame (§8 of the PRD). A phone with a level readout, or a second phone recording the attitude, is enough. |
-| Write the 30 sentences | Same afternoon, on the spot. Writing them later from photographs produces worse sentences. |
-| Trace to outline PNGs | One to one and a half days. Mark `anchor_norm` by hand, one click each. |
-| Metadata records | Two hours. §5.1 for all 30, plus the `support_class` compatibility table the filter's predicate 7 depends on. |
+| 30 photographs, pitch and distance logged | Tracing (Week 4–5); the pitch log feeds `ref_pitch_deg` in §5.1, which the placement correction in §6.3 corrects *from* |
+| 30 direction sentences | **Six are pasted into the §4.2 prompt as style examples — needed by the first eval run in Week 2.** All 30 become the hand-written baseline that generated directions are compared against in §9.5. |
+| The 30 `pose_id` strings | The schema enum in §4.1. The model must choose a pose from a fixed list, so the list has to exist before any request is sent. |
+| `support_class` per pose | Filter predicate 7 (§4.3), Week 4 |
 
-**Track B — eval harness, ~6 hours.**
+Write the sentences on location, in the moment, not afterwards from the photographs. Sentences written later are worse, and they are the single highest-leverage artifact in the project.
 
-Directory scaffold, `run.py` with concurrency 8, the §9.2 agreement check, the static-HTML rating page, `report.py` computing §9.4. All against the provider directly.
+**Track B — eval harness, ~6 hours. This is the eval.**
 
-**Track C — collect eval scenes, ~2 hours.**
+Directory scaffold, `run.py` with concurrency 8, the §9.2 agreement check, the static-HTML rating page, `report.py` computing §9.4. Calls the model provider directly — no proxy, no phone.
 
-100 scene photographs, no people. Do this during the same walks as Track A.
+**Track C — eval scenes, ~2 hours. Required to run the eval.**
 
-**Exit:** 30 traced assets with metadata; a harness that runs 100 scenes in two minutes.
+100 scene photographs, no people. Shot during the same walks as Track A1, at the same six-ish location types, since a corpus of scenes that share no affordances with the reference set tests the wrong thing.
+
+Consumed by every eval cycle in Weeks 2–3, and by nothing else. They are not shipped in the app and are never used at runtime.
+
+**Exit:** 30 sentences, 30 pose ids, a support-class table, 100 scenes, and a harness that runs them all in two minutes.
 
 ---
 
-### Weeks 2–3 — Eval, the gate
+### Deferred out of Week 1: tracing
+
+Tracing the 30 silhouettes and marking anchor points is 10–12 hours, and **none of it is needed until Week 6's placement work.** The eval renders nothing — a rater looks at a scene photograph with a box drawn on it and a sentence underneath. The proxy needs pose *ids*, not image assets.
+
+So tracing moves to Weeks 4–5, after the eval has passed. If the eval fails at Week 3, that is 12 hours not spent on artwork for a product that isn't being built. It also means that if the eval fails in the way that requires reshooting the reference set, there is nothing to re-trace.
+
+This is the general scheduling rule: **anything not needed until the app is built should not be built before the eval runs.**
+
+---
+
+### Weeks 2–3 — The eval
 
 **~25 hours across two weeks. This is where the project lives or dies.**
+
+The whole point of this phase: find out whether the model is good enough at this task to justify building an app on top of it. Nothing in Weeks 4 onward starts until this passes.
 
 The loop is: run 100 scenes, rate 300 cards (~40 min), read the failure-class breakdown, change one thing in the prompt, rerun. Expect five to eight cycles.
 
 | | |
 |---|---|
-| Cycles 1–3 | Prompt iteration against the rubric. Most movement happens here. Every prompt version keeps its runs and ratings — this is a permanent labelled dataset, not scratch work. |
-| Bbox agreement | Runs automatically each cycle. Answers whether a dedicated grounding model is needed. |
-| Cycles 4–6 | Diminishing returns. If `at_least_one_good_per_scene` has plateaued below gate, that is the answer. |
-| Execution test | Half a day: 20 sampled scenes, physically executed and photographed. |
-| Blind comparison | Two days elapsed, an hour of work — 15 raters, assisted versus hand-written baseline. |
+| Cycles 1–3 | Rewriting the prompt and re-measuring. Most improvement happens here. Every prompt version keeps its runs and ratings — this is a permanent labelled dataset, not scratch work. |
+| Coordinate check | The §9.2 second-opinion call, run automatically each cycle. Decides whether a separate object-detection model is needed for box coordinates. |
+| Cycles 4–6 | Diminishing returns. If `at_least_one_good_per_scene` has stopped improving and is still below threshold, that is the answer. |
+| Execution test | Half a day: 20 sampled scenes, physically visited, directions followed, photographs taken. |
+| Blind comparison | Two days elapsed, an hour of work — 15 raters, model-directed photographs versus hand-written baseline. |
 
-**Gate:** `at_least_one_good_per_scene >= 0.80`, zero-bucket under 10%, and a win over random-from-bucket in blind comparison.
+**Pass condition:** `at_least_one_good_per_scene >= 0.80`, fewer than 10% of scenes producing zero good cards, and a win over random-pose-from-the-right-bucket in blind comparison.
 
-**If the gate fails**, the branch depends on which metric missed. Weak sentences with sound geometry means reshoot the reference set and redo the few-shot examples — an afternoon, then rerun. Sound sentences that produce dull photographs means the concept is weaker than hoped, and no amount of app work fixes it. Do not proceed to Week 4 on a near miss.
+**If it fails**, the next move depends on which measure missed. Sound geometry but weak sentences means reshoot the reference set and replace the six style examples in the prompt — an afternoon, then rerun. Sound sentences that still produce dull photographs means the concept is weaker than hoped, and no amount of app work fixes it. Do not proceed to Week 4 on a near miss.
 
 ---
 
-### Week 4 — Proxy and prompt in production shape
+### Weeks 4–5 — Proxy, and the deferred tracing
 
-**~10 hours.**
+**~22 hours.**
 
-Serverless function, the §3.1 contract, schema-constrained call, the seven filter predicates, backfill logic, rate limiting, config-driven prompt and model version. Unit tests on the filter predicates specifically — they are the only real logic in the proxy and each one is a one-line predicate that is easy to get subtly wrong.
+**Proxy, ~10 hours.** Serverless function, the §3.1 contract, the schema-attached model call, the seven filter predicates, backfill logic, rate limiting, config-driven prompt and model version. Unit tests on the filter predicates specifically — they are the only real logic in the proxy and each is a one-line predicate that is easy to get subtly wrong.
 
 Testable end to end with curl and a folder of photographs. No app required.
 
-**Exit:** an endpoint that returns three valid cards for any photograph, including garbage input.
+**Tracing, ~12 hours**, deferred from Week 1. Trace the 30 to outline PNGs at 512px, mark `anchor_norm` by hand, write the §5.1 metadata records including `ref_pitch_deg` from the Week 1 shoot log.
+
+These two are independent and can interleave freely. Tracing is the kind of work that fits in evenings when the proxy is blocked on a provider response.
+
+**Exit:** an endpoint that returns three valid cards for any photograph, including garbage input; 30 placeable assets with metadata.
 
 ---
 
-### Weeks 5–6 — Client
+### Weeks 6–7 — Client
 
 **~30 hours.**
 
@@ -692,7 +742,7 @@ Placement is the piece most likely to overrun, because it is the only part that 
 
 ---
 
-### Week 7 — Field tuning
+### Week 8 — Field tuning
 
 **~10 hours.**
 
@@ -702,7 +752,7 @@ Also the first honest read on latency — lock to cards, p50 and p95, on cellula
 
 ---
 
-### Weeks 8–10 — Ship and go quiet
+### Weeks 9–11 — Ship and go quiet
 
 **~5 hours, then wait.**
 
@@ -714,16 +764,20 @@ Resisting the urge to ship fixes during this window is the point. Changes mid-ob
 
 ### Summary
 
-| Week | Phase | Effort | Blocks |
+| Week | Phase | Effort | Position |
 |---|---|---|---|
-| 0 | Smoke test | 2h | Everything |
-| 1 | Reference set + harness | 18h | Eval |
-| 2–3 | **Eval — the gate** | 25h | All build work |
-| 4 | Proxy | 10h | Client |
-| 5–6 | Client | 30h | Field tuning |
-| 7 | Field tuning | 10h | Ship |
-| 8–10 | Ship and observe | 5h + wait | Roadmap |
+| 0 | Smoke test | 2h | Before the eval |
+| 1 | Shoot + sentences + harness + scenes | 13h | Before the eval |
+| 2–3 | **The eval** | 25h | Decides everything after |
+| 4–5 | Proxy + deferred tracing | 22h | After |
+| 6–7 | Client | 30h | After |
+| 8 | Field tuning | 10h | After |
+| 9–11 | Ship and observe | 5h + wait | After |
 
-**Total to shipped build: about 100 hours over seven weeks, with a hard gate at week 3 that gates roughly 55 of them.**
+**Total to shipped build: about 107 hours over eight working weeks, plus two weeks of observation.**
 
-The shape worth noticing: a quarter of the effort comes before any product code, and it is the quarter that determines whether the rest is worth doing. Weeks 4 through 7 are ordinary app engineering with no research risk in them. All the uncertainty is front-loaded on purpose.
+**40 hours happen before the eval; 67 happen only if it passes.** Moving tracing later is what shifts 12 of those hours from the first group to the second — a free change, since the traced assets aren't needed until Week 6 either way.
+
+The scheduling rule, worth applying to anything added to this plan later: **if it isn't needed to run the eval, don't build it until the eval passes.** The two items that look like exceptions and aren't — the 30 sentences and the 30 pose ids — are consumed by the very first eval run, which is why the shoot has to happen in Week 1 even though the photographs themselves aren't needed until Week 4.
+
+The overall shape: 40 hours determine whether the remaining 67 are worth spending, and none of those 40 involve writing product code. Weeks 4 through 8 are ordinary app engineering with no open questions in them. The uncertainty is front-loaded on purpose.
