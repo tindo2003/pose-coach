@@ -569,9 +569,27 @@ bbox_disagreement = fraction failing §9.2
 
 ### 9.5 Execution test
 
-The rubric can be satisfied by directions that produce boring photographs. So: take a 20-scene sample, physically go, follow the directions, photograph the results. Blind-compare against photographs from the 30 hand-written directions, rated by people who weren't present.
+The four checkboxes can all be satisfied by directions that produce boring photographs. So the rubric is not the last word — someone has to go outside and take the pictures.
 
-Baselines to beat: random pose from the correct support bucket, and best hand-curated pick. Failing to beat random-from-bucket means the scene understanding contributes nothing — learned in a week for the price of some API calls.
+**Sample.** 20 scenes drawn from the 100.
+
+**The two baselines, in order of importance.**
+
+**Baseline 1 — random pose from the correct support bucket.** Look at the scene yourself, decide by eye whether it offers a knee-height, hip-height, chest-height or no support, then pick a pose at random from the 30 that fits that bucket. This is the cheap comparison and it is the one that can kill the project. If model-directed photographs don't beat it, the model isn't using the scene — it's picking plausible poses, which a dropdown does for free and offline.
+
+Run this first. It costs nothing and it is the fastest way to learn the idea doesn't work.
+
+**Baseline 2 — a human directing on the spot.** At each of the 20 locations, direct a person yourself and take the photograph, *before* looking at what the model produced for that scene. Then follow the model's direction and take a second photograph.
+
+**This on-the-spot step is required, and the reason is a trap worth naming.** The obvious approach is to compare against the 30 reference photographs from Week 1. That comparison is close to meaningless, because those were shot at the reference locations and the model's were shot at the eval locations. Any difference could be the locations rather than the directions. Only matched pairs at identical locations, same light, same day, same subject, isolate the variable being tested.
+
+The Week 1 photographs are the wrong instrument here. They exist to supply the sentences, not to serve as a comparison set.
+
+**Holdout.** Six of the 30 sentences are pasted into the prompt as style examples. **The remaining 24 are never shown to the model** and are held back as an untouched reference for how a human writes these. Choose which six early and don't rotate them — a sentence the model has seen is not evidence about a sentence it hasn't.
+
+**Judging.** Strip context, pair the photographs, show them to 15 people who weren't present, ask which one they'd rather have of themselves. Do not judge your own.
+
+**Result:** win over Baseline 1 is mandatory. Parity with Baseline 2 is the target; losing narrowly to a human directing in person is acceptable, because the human isn't in the product.
 
 ---
 
@@ -629,116 +647,192 @@ Client constants ship in the binary for the first build. If tuning proves noisy,
 
 ## 13. Timeline
 
-Assumes one engineer working evenings and weekends, roughly 15 hours a week. A full-time pair would compress this to about three weeks but would not change the ordering, because Weeks 2–3 are a measurement, not a build — they take as long as they take regardless of headcount.
+One engineer, evenings and weekends, roughly 15 hours a week. A full-time pair would compress the build weeks but not Weeks 2–3, because those are a measurement and take as long as they take.
 
-### Week 0 — Smoke test
-
-**~2 hours, one evening.**
-
-Walk a few blocks, photograph ten scenes, paste them into a chat with a first draft of the §4.2 prompt. Read the output.
-
-No code. The purpose is to find out which of the five failure classes dominates before committing to a design that assumes a particular one. If it mostly names objects that aren't there, the §4.3 filter matters most. If the objects are real but the wrong size to use, the prompt's feasibility paragraph needs the most work. If the sentences read like a photography manual, the fix is the style examples in the prompt.
-
-**Exit:** a rough sense of the dominant failure mode, and a prompt worth running at scale.
+Weeks 2–3 decide whether the rest happens. Everything before them exists to make that measurement possible; everything after them is ordinary app engineering that is only worth doing if the measurement passes.
 
 ---
 
-### Week 1 — Reference set and harness, in parallel
+### Week 0 — Twenty minutes of sanity checking
 
-Each artifact below is tagged with where it gets consumed. Two of them are required before the eval can run at all; two are not needed until the app is built. That difference changes the schedule.
+**~2 hours.**
 
-**Track A1 — shoot and write, ~5 hours. Required to run the eval.**
+Walk a few blocks. Photograph ten empty spots — a bench, some steps, a wall, a railing, open pavement.
 
-| Artifact | Consumed by |
-|---|---|
-| 30 photographs, pitch and distance logged | Tracing (Week 4–5); the pitch log feeds `ref_pitch_deg` in §5.1, which the placement correction in §6.3 corrects *from* |
-| 30 direction sentences | **Six are pasted into the §4.2 prompt as style examples — needed by the first eval run in Week 2.** All 30 become the hand-written baseline that generated directions are compared against in §9.5. |
-| The 30 `pose_id` strings | The schema enum in §4.1. The model must choose a pose from a fixed list, so the list has to exist before any request is sent. |
-| `support_class` per pose | Filter predicate 7 (§4.3), Week 4 |
+Open a chat with the model, paste in a first draft of the §4.2 prompt, attach a photo, and read what comes back. Do this ten times.
 
-Write the sentences on location, in the moment, not afterwards from the photographs. Sentences written later are worse, and they are the single highest-leverage artifact in the project.
+You are looking for **which way it fails**, because that determines what the rest of the design has to defend against:
 
-**Track B — eval harness, ~6 hours. This is the eval.**
+- It describes a bench that isn't in the picture → the §4.3 filter is the priority
+- The bench is real but it tells someone to sit on a 20cm ledge → the feasibility paragraph in the prompt needs the work
+- The sentences read like a photography textbook → the style examples are the lever
 
-Directory scaffold, `run.py` with concurrency 8, the §9.2 agreement check, the static-HTML rating page, `report.py` computing §9.4. Calls the model provider directly — no proxy, no phone.
+No code. No repo. Just a chat window and a phone.
 
-**Track C — eval scenes, ~2 hours. Required to run the eval.**
-
-100 scene photographs, no people. Shot during the same walks as Track A1, at the same six-ish location types, since a corpus of scenes that share no affordances with the reference set tests the wrong thing.
-
-Consumed by every eval cycle in Weeks 2–3, and by nothing else. They are not shipped in the app and are never used at runtime.
-
-**Exit:** 30 sentences, 30 pose ids, a support-class table, 100 scenes, and a harness that runs them all in two minutes.
+**You now have:** a rough sense of the dominant failure, and a prompt worth testing properly.
 
 ---
 
-### Deferred out of Week 1: tracing
+### Week 1 — Building the test
 
-Tracing the 30 silhouettes and marking anchor points is 10–12 hours, and **none of it is needed until Week 6's placement work.** The eval renders nothing — a rater looks at a scene photograph with a box drawn on it and a sentence underneath. The proxy needs pose *ids*, not image assets.
+**~13 hours.** Three things, and two of them happen on the same walk.
 
-So tracing moves to Weeks 4–5, after the eval has passed. If the eval fails at Week 3, that is 12 hours not spent on artwork for a product that isn't being built. It also means that if the eval fails in the way that requires reshooting the reference set, there is nothing to re-trace.
+#### The test questions (~2h)
 
-This is the general scheduling rule: **anything not needed until the app is built should not be built before the eval runs.**
+Photograph **100 empty scenes**. No people in any of them. Benches, steps, walls, railings, doorways, open paths. These are what you will hand the model 5–8 times over the next fortnight to see whether it can look at an empty space and work out what a person should do there.
 
----
+Shoot them in the same kinds of places you shot the reference set. A hundred scenes with no benches or walls in them tests the wrong thing.
 
-### Weeks 2–3 — The eval
+#### The rules and the baseline (~5h)
 
-**~25 hours across two weeks. This is where the project lives or dies.**
+On the same walk, photograph **30 poses with a person in them**, and write the direction sentence for each one on the spot — *"Sit on the step, elbows on your knees, lean forward a bit."* Written afterwards from the photograph, they come out worse.
 
-The whole point of this phase: find out whether the model is good enough at this task to justify building an app on top of it. Nothing in Weeks 4 onward starts until this passes.
+Log the camera pitch and rough distance for every frame. You will need it in Week 6 and reconstructing it later is miserable.
 
-The loop is: run 100 scenes, rate 300 cards (~40 min), read the failure-class breakdown, change one thing in the prompt, rerun. Expect five to eight cycles.
+That gives you four things:
 
 | | |
 |---|---|
-| Cycles 1–3 | Rewriting the prompt and re-measuring. Most improvement happens here. Every prompt version keeps its runs and ratings — this is a permanent labelled dataset, not scratch work. |
-| Coordinate check | The §9.2 second-opinion call, run automatically each cycle. Decides whether a separate object-detection model is needed for box coordinates. |
-| Cycles 4–6 | Diminishing returns. If `at_least_one_good_per_scene` has stopped improving and is still below threshold, that is the answer. |
-| Execution test | Half a day: 20 sampled scenes, physically visited, directions followed, photographs taken. |
-| Blind comparison | Two days elapsed, an hour of work — 15 raters, model-directed photographs versus hand-written baseline. |
+| **6 sentences** | Pasted into the prompt as examples of what a good answer sounds like. Pick which six now and never rotate them. |
+| **24 sentences** | Held back. Never shown to the model. They are your untouched record of how a human writes these. A sentence the model has seen is not evidence about one it hasn't. |
+| **30 `pose_id` strings** | The menu. The schema restricts the model to choosing from this exact list, so the list has to exist before the first request. |
+| **30 photographs + pitch log** | Not needed until Week 4, when you trace them. |
 
-**Pass condition:** `at_least_one_good_per_scene >= 0.80`, fewer than 10% of scenes producing zero good cards, and a win over random-pose-from-the-right-bucket in blind comparison.
+#### The grading machine (~6h)
 
-**If it fails**, the next move depends on which measure missed. Sound geometry but weak sentences means reshoot the reference set and replace the six style examples in the prompt — an afternoon, then rerun. Sound sentences that still produce dull photographs means the concept is weaker than hoped, and no amount of app work fixes it. Do not proceed to Week 4 on a near miss.
+A Python script that fires all 100 scenes at the model in parallel and writes the responses to a JSONL file. Plus a plain local webpage that shows one card at a time — the scene photo, the box the model drew on it, the sentence — with four checkboxes underneath.
 
----
-
-### Weeks 4–5 — Proxy, and the deferred tracing
-
-**~22 hours.**
-
-**Proxy, ~10 hours.** Serverless function, the §3.1 contract, the schema-attached model call, the seven filter predicates, backfill logic, rate limiting, config-driven prompt and model version. Unit tests on the filter predicates specifically — they are the only real logic in the proxy and each is a one-line predicate that is easy to get subtly wrong.
-
-Testable end to end with curl and a folder of photographs. No app required.
-
-**Tracing, ~12 hours**, deferred from Week 1. Trace the 30 to outline PNGs at 512px, mark `anchor_norm` by hand, write the §5.1 metadata records including `ref_pitch_deg` from the Week 1 shoot log.
-
-These two are independent and can interleave freely. Tracing is the kind of work that fits in evenings when the proxy is blocked on a provider response.
-
-**Exit:** an endpoint that returns three valid cards for any photograph, including garbage input; 30 placeable assets with metadata.
-
----
-
-### Weeks 6–7 — Client
-
-**~30 hours.**
+**Four checkboxes, not pass/fail**, because a single verdict tells you the score dropped without telling you which rule to rewrite:
 
 | | |
 |---|---|
-| Camera session, dual stream | 4h |
-| Stability detector, ring buffer, sharpness | 6h. Tuning `MOTION_THRESHOLD` against real handheld footage takes longer than writing it. |
+| `grounded` | Does the object it named actually exist there? |
+| `feasible` | Could a person really do that, given the object's real size? |
+| `clear` | Would a friend understand this said out loud? |
+| `well_lit` | Would the subject be decently lit standing there? |
+
+#### Deliberately not done this week: tracing
+
+Turning the 30 photographs into silhouette outlines is 12 hours, and **the eval never renders a silhouette** — a rater looks at a photo, a box and a sentence. The app doesn't need them until Week 6.
+
+So tracing waits until Week 4. If Weeks 2–3 fail, that's 12 hours not spent drawing artwork for a product that isn't being built. And if they fail in the way that means reshooting the reference set, there's nothing to re-trace.
+
+**The rule, for anything added to this plan later: if it isn't needed to run the eval, don't build it until the eval passes.**
+
+**You now have:** 100 scenes, 6 example sentences, 24 held back, a list of 30 pose ids, and a script that grades them.
+
+---
+
+### Weeks 2–3 — Sitting the test
+
+**~25 hours. This is where the project lives or dies.**
+
+The same five steps, 5 to 8 times.
+
+#### 1. Run it
+
+`python run.py --prompt 2026-09-07a`. It sends all 100 scene photos to the model, each with your written rules and your 6 example sentences attached, 8 at a time. Two minutes, a few dollars.
+
+#### 2. Read what came back
+
+Exactly 3 suggestions per scene. **300 rows.** Each one names an object, gives coordinates for it, picks a pose id from your list of 30, and writes a sentence.
+
+#### 3. The coordinate check runs itself
+
+For every card, the script makes a *second, separate* call: *"What object is at these coordinates?"* If the answer doesn't match what the card claimed, the model made the coordinates up.
+
+No human involved. This one number decides whether you eventually need a second specialised model just for locating objects — and until it says so, you don't.
+
+#### 4. Grade it
+
+Open the local webpage. 300 cards, four clicks each, about 40 minutes.
+
+**The score is per scene, not per card.** This is the part most likely to be got wrong:
+
+```
+Wrong:  how many of the 300 cards were good?
+Right:  how many of the 100 scenes produced at least one good card?
+```
+
+The app shows three and the photographer picks one, so a scene with one good card out of three is a scene the product handles fine. Card-level accuracy would report 33% on a scene that works.
+
+The number that actually matters is **how many scenes produced zero good cards**, because that is the only case the user experiences as broken.
+
+#### 5. Change one thing and go again
+
+If it keeps proposing seats on chest-high fences, add a line to the feasibility paragraph. If sentences drift long and literary, tighten the register instruction. One change per cycle, so you know what moved the number.
+
+Keep every version's runs and ratings. That accumulating set of graded cards is a real asset, not scratch work.
+
+**Expect most of the improvement in cycles 1–3, and diminishing returns after.** If the score has stopped moving and is still under threshold, that is the answer, not a reason for a ninth cycle.
+
+#### The final exam
+
+Once the webpage score clears, go outside.
+
+**20 locations from the 100.** At each one:
+
+1. **Direct a person yourself first, before looking at the model's answer**, and take that photograph.
+2. Then follow the model's direction and take a second photograph.
+3. Separately, pick a pose at random from the 30 that fits that spot's support type, and take a third.
+
+The first-before-looking part matters, and so does doing it on location. The obvious shortcut — comparing against the 30 reference photographs from Week 1 — is close to worthless, because those were taken somewhere else. Any difference could be the location rather than the direction. **Only matched pairs at the same spot, same light, same day, same person, isolate what you are testing.**
+
+Then strip context, pair them up, and show them to 15 people who weren't there. Ask which one they'd rather have of themselves.
+
+**Passing means all three of:**
+
+| | |
+|---|---|
+| At least one good card on **≥80% of scenes** | |
+| **Under 10% of scenes** producing zero good cards | |
+| Model-directed photos **beat random-pose-from-the-right-bucket** | Mandatory. Losing here means the model isn't using the scene at all — it's picking plausible poses, which a dropdown does for free and offline. |
+
+Parity with the on-the-spot human is the target. Losing narrowly to a person directing in the room is fine; that person isn't in the product.
+
+**If it fails:** sound geometry but weak sentences → reshoot the reference set, swap the six examples, rerun. That's an afternoon. Sound sentences that still make dull photographs → the concept is weaker than hoped and no app work fixes it. **Do not start Week 4 on a near miss.**
+
+---
+
+### Weeks 4–5 — The server, and finally the tracing
+
+**~22 hours.** No mobile app yet.
+
+#### The proxy (~10h)
+
+One serverless function implementing §3.1. It takes an image and a pitch angle, attaches your API key, calls the model with the schema attached, runs the seven filter rules, backfills any dropped cards from the fallback set, and returns exactly three.
+
+Unit-test the seven filter rules specifically. They are the only real logic in the whole server and each is a one-line predicate that's easy to get subtly wrong.
+
+Testable end to end with `curl` and a folder of photos. Still no phone involved.
+
+#### Tracing (~12h)
+
+The work deferred from Week 1. Trace each of the 30 photographs into an outline PNG, click the anchor point on each — the spot where the body touches the support, hips for seated, shoulder for leaning, feet for standing — and write the §5.1 metadata, including the pitch you logged in Week 1.
+
+The two tasks interleave well. Tracing is evening work for while the proxy is blocked on a response.
+
+**You now have:** an endpoint that returns three valid cards for any photograph including garbage, and 30 placeable assets.
+
+---
+
+### Weeks 6–7 — The app
+
+**~30 hours.** Now you write the mobile app.
+
+| | |
+|---|---|
+| Camera session, both streams | 4h |
+| Stability detector, ring buffer, sharpness | 6h — tuning `MOTION_THRESHOLD` against real handheld footage takes longer than writing the code |
 | IMU sampling, exposure-settling suppression | 3h |
-| dHash cache | 2h |
-| Proxy client, timeout, retry, fallback | 3h |
-| Silhouette placement (§6) | 8h. The single largest client item. Both scale paths, pitch correction, mirroring, roll, bounds clamp. |
-| Card strip, tap-to-pin, pan and pinch | 6h |
-| Shutter, camera roll | 2h |
-| Telemetry (§8) | 3h |
+| Scene cache | 2h |
+| Network client, timeout, retry, fallback | 3h |
+| **Silhouette placement (§6)** | **8h** — both scale paths, pitch correction, mirroring, roll, bounds clamp |
+| Card strip, tap-to-pin, drag and pinch | 6h |
+| Shutter and camera roll | 2h |
+| Telemetry | 3h |
 
-Placement is the piece most likely to overrun, because it is the only part that cannot be verified by reading the code — it has to be looked at, on real scenes, at varied pitch. Budget an afternoon purely for eyeballing it.
-
-**Exit:** installable build, end to end.
+**Placement is the item most likely to overrun**, because it's the only part you cannot verify by reading the code. It has to be looked at, on real scenes, at varied camera angles. Budget an afternoon purely for standing outside looking at silhouettes and deciding whether they sit right.
 
 ---
 
@@ -746,38 +840,36 @@ Placement is the piece most likely to overrun, because it is the only part that 
 
 **~10 hours.**
 
-Walk with it. The constants in §10 are guesses and this is where they become measurements: motion threshold against real hands, hash tolerance against real re-pointing, pitch squash against real placement.
+Walk around with it. Every constant in §10 is currently a guess, and this is where guesses become measurements: motion threshold against real hands, cache tolerance against real re-pointing, pitch correction against real placement.
 
-Also the first honest read on latency — lock to cards, p50 and p95, on cellular rather than office wifi.
+Also the first honest latency number — lock to cards, median and 95th percentile, on cellular rather than office wifi.
 
 ---
 
-### Weeks 9–11 — Ship and go quiet
+### Weeks 9–11 — Ship, then stop touching it
 
 **~5 hours, then wait.**
 
-Ship to the original testers plus ten more. Then stop shipping and read the PRD §11 metrics for two weeks. Sessions per week is the number that matters, and it needs elapsed time rather than effort.
+Ship to the five original pairs plus ten more. Then go quiet for two weeks and read the PRD §11 metrics.
 
-Resisting the urge to ship fixes during this window is the point. Changes mid-observation make the retention read uninterpretable.
+Sessions per week is the number that matters and it needs elapsed time, not effort. **Shipping fixes during the observation window makes the retention read uninterpretable**, which is the hardest discipline item on this list.
 
 ---
 
 ### Summary
 
-| Week | Phase | Effort | Position |
+| Week | What | Hours | |
 |---|---|---|---|
-| 0 | Smoke test | 2h | Before the eval |
-| 1 | Shoot + sentences + harness + scenes | 13h | Before the eval |
-| 2–3 | **The eval** | 25h | Decides everything after |
-| 4–5 | Proxy + deferred tracing | 22h | After |
-| 6–7 | Client | 30h | After |
-| 8 | Field tuning | 10h | After |
-| 9–11 | Ship and observe | 5h + wait | After |
+| 0 | Ten photos into a chat window | 2 | Before the eval |
+| 1 | 100 scenes, 30 poses, grading script | 13 | Before the eval |
+| **2–3** | **Run it, grade it, fix the prompt, ×6** | **25** | **Decides everything after** |
+| 4–5 | Server proxy, trace the silhouettes | 22 | Only if it passed |
+| 6–7 | Mobile app | 30 | Only if it passed |
+| 8 | Field tuning | 10 | Only if it passed |
+| 9–11 | Ship and observe | 5 + wait | Only if it passed |
 
-**Total to shipped build: about 107 hours over eight working weeks, plus two weeks of observation.**
+**About 107 hours over eight working weeks, plus two weeks of watching.**
 
-**40 hours happen before the eval; 67 happen only if it passes.** Moving tracing later is what shifts 12 of those hours from the first group to the second — a free change, since the traced assets aren't needed until Week 6 either way.
+**40 hours happen before the eval; 67 happen only if it passes.** Moving the tracing to Week 4 is what shifted 12 of those hours from the first column to the second, at no cost, because the assets weren't needed until Week 6 anyway.
 
-The scheduling rule, worth applying to anything added to this plan later: **if it isn't needed to run the eval, don't build it until the eval passes.** The two items that look like exceptions and aren't — the 30 sentences and the 30 pose ids — are consumed by the very first eval run, which is why the shoot has to happen in Week 1 even though the photographs themselves aren't needed until Week 4.
-
-The overall shape: 40 hours determine whether the remaining 67 are worth spending, and none of those 40 involve writing product code. Weeks 4 through 8 are ordinary app engineering with no open questions in them. The uncertainty is front-loaded on purpose.
+None of the first 40 hours involve writing product code. Weeks 4 through 8 are ordinary engineering with no open questions in them. The uncertainty is front-loaded deliberately.
