@@ -499,6 +499,129 @@ Surviving cards are returned in model order; backfill appends fallbacks.
 
 ---
 
+### 4.4 The three factors
+
+A pose is only good if three things line up: something to interact with, a decent backdrop, and a body that can actually do it. The design so far only handles the first.
+
+The three differ in a way that determines where each one lives:
+
+| Factor | Where it comes from | How often it changes | Cost to add |
+|---|---|---|---|
+| **Support** | The photo | Every scene | Already built |
+| **Background** | The photo | Every scene | Four schema fields, one prompt paragraph |
+| **Subject** | Not in the photo at all | Once per session | A real design problem — see below |
+
+#### Background
+
+The system currently asks *what can you lean on* and never asks *what is behind you*. A bin, a parked car, a bright sign, a pole growing out of someone's head — these ruin photographs at least as reliably as an awkward pose does.
+
+It costs almost nothing to add. Same photo, same call, four more fields:
+
+| Field | Values |
+|---|---|
+| `background_quality` | clean / busy / cluttered |
+| `background_problem` | Short phrase, or empty. "Bins behind the bench", "parked cars" |
+| `background_feature` | Short phrase, or empty. Something worth *using*: an archway, a mural, a view |
+| `subject_placement_note` | Optional. "Stand a metre left of the bench to clear the bins" |
+
+`background_feature` is the half people forget. Avoiding clutter is defensive; noticing an arch and saying *"stand under the arch so it frames you"* is a different and better instruction. It's also a pose reason that has nothing to do with what you can sit on, which the current design cannot express at all.
+
+**The conflict, and the policy.** Support says where you *can* sit. Background says where you *should* stand. They disagree constantly — the bench is perfect and there's a wheelie bin directly behind it.
+
+Three possible resolutions:
+
+| Policy | Effect |
+|---|---|
+| Support wins | Background breaks ties only. Simple, and produces photos with bins in them. |
+| Background wins | Clean backdrop preferred even at the cost of a standing pose. Safe, and throws away good affordances. |
+| **Surface it** | Return the rating per card and show it. The photographer decides. |
+
+**Take the third.** The photographer is standing there and can see things the model can't — that the bin is being emptied right now, that the "clutter" is their friend's dog. Showing `background_quality` as a small marker on each card costs one glyph and hands the judgement to the person best placed to make it.
+
+Add a rule to the prompt: when a spot has a clear background problem, at least one of the three cards must avoid it, even if that means a less interesting pose. Never return three cards that all put the subject in front of the same bins.
+
+#### Subject
+
+Harder, because of a tension the CUJ created deliberately.
+
+**Recommendations fire before the subject walks over.** That's what makes the wait affordable — the dead time already exists. So at the moment cards are generated, the app has never seen the person it is directing.
+
+That matters more than it sounds:
+
+- A pose that assumes trousers doesn't work in a dress
+- Crouching on wet ground doesn't work in light clothes
+- Climbing doesn't work in heels
+- Sitting on the floor doesn't work for someone with a bad knee
+- Someone 1.55m and someone 1.85m do not fit the same railing
+
+Four ways to handle it:
+
+**1. Ignore it.** Keep all 30 poses clothing- and body-agnostic. Simplest, and it deletes roughly a third of the more interesting poses — every crouch, every floor-sit, every foot-up-on-the-wall.
+
+**2. Ask at first run.** Three or four taps: what they're wearing, footwear, happy to sit on the ground, roughly how tall. Tag all 30 poses with what they require and filter. Cheap, deterministic, no photograph of anyone, no change to the privacy posture.
+
+The problem is social, not technical. *"How tall is your friend, and is she wearing a skirt?"* is a strange thing to make someone answer while that friend stands three metres away waiting.
+
+**3. Learn from rejection, within the session.** No setup at all. Default to permissive — every pose is offered. When the photographer swipes a card away, record what that pose required, and stop offering poses with that requirement for the rest of the session. Swipe away a crouch, get no more crouches.
+
+Zero friction, nothing to ask, self-correcting, and it degrades gracefully — the cost of being wrong is one wasted card, which the three-card menu was already designed to absorb.
+
+**4. One photo at session start.** Photographer takes one shot of the subject. The app derives a text description — *"trousers, flat shoes, about 1.7m, carrying a bag"* — and discards the image. Subject details are stable for a whole session, so this happens once and never disturbs the per-scene timing.
+
+**Recommendation: 3 as the default, with 2 available as an explicit shortcut.** Rejection-learning fits the CUJ's insistence on the camera being the home screen with nothing before it, and it gets most of the benefit for none of the awkwardness. Option 2 becomes a small "she's in a dress" toggle for anyone who wants to skip the first wasted card. Option 4 is the upgrade if tags turn out too coarse, and it changes the privacy story, so it needs its own decision.
+
+**Pose requirement tags.** Whichever route, the 30 poses need tagging during Week 1. This is a column in the metadata, not new infrastructure:
+
+```
+requires_trousers      crouch, wide stance, foot-up-on-wall, floor-sit
+requires_clean_ground  floor-sit, kneel, lying
+requires_flat_shoes    crouch, climb, walk-toward, stairs
+requires_flexibility   deep crouch, floor-sit, kneel
+requires_height_range  perch poses, which depend on the support's real height
+```
+
+#### Where subject and support interact numerically
+
+Every other constraint is a filter. This one is arithmetic.
+
+A 91cm railing is hip height for someone 1.8m tall and nearly waist-high for someone 1.55m. So "can they perch on this" is not a property of the railing — it's a property of the ratio.
+
+```
+support_ratio = support_height_m / subject_height_m
+
+0.45 – 0.55   → seat height. Sitting works.
+0.50 – 0.62   → perch height. Perching and hip-leaning work.
+> 0.75        → too high to use as a support. Lean against, don't sit on.
+```
+
+This is the one place where knowing the subject's height genuinely improves an answer rather than just filtering an option, and it is also the strongest argument for the measured-surface options in §1. Under Option A the support height is a guess and the subject height is a guess, so the ratio is a guess squared. Under B, C or D the support height is measured in centimetres and only the subject's height is estimated.
+
+#### What this changes elsewhere
+
+| Section | Change |
+|---|---|
+| §4.1 Schema | Four background fields added |
+| §4.2 Prompt | A background paragraph; the subject description passed in as text when available |
+| §4.3 Filter | New rule: not all three cards may share the same `background_problem` |
+| §5.1 Asset metadata | Five requirement tags per pose |
+| §8 Telemetry | Log which requirement caused a swipe-away, so rejection-learning has something to learn from |
+| §9 Eval | See below — this is the part that doesn't come free |
+
+#### The eval gap
+
+The 100 eval scenes are deliberately empty of people. That tests support and background perfectly well — both are properties of the scene.
+
+**It tests subject fit not at all.** Nothing in the current harness would catch the model confidently telling a person in a dress to crouch on wet pavement.
+
+The check needed is small and separate: take 20 of the 100 scenes, run each one three times with different subject descriptions passed in — *"trousers and trainers"*, *"dress and heels"*, *"trousers, avoids sitting on the ground"* — and answer two questions.
+
+1. **Did the recommendations actually change?** If they're identical across all three, the subject description is being ignored and the whole mechanism is decorative.
+2. **Did they change sensibly?** No crouching in the heels run; no floor-sitting in the third.
+
+Sixty cards, about ten minutes of reading. Add it as a fourth step in the Weeks 2–3 loop, run once every couple of cycles rather than every cycle.
+
+---
+
 ## 5. Silhouette assets
 
 ### 5.1 Format
