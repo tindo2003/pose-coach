@@ -581,3 +581,315 @@ Stated explicitly so nothing here reads as more settled than it is.
 **Artifacts produced by this review**
 - `experiments/pose_coach_eval_power.py` — reproducible statistical checks
 - `experiments/pose_coach_eval_power_results.txt` — captured output
+
+---
+
+## 9. Decision: which option to build
+
+### 9.1 The recommendation
+
+**Build Option A, and cut precise silhouette placement from v1.**
+
+The doc already picks A, on sequencing grounds — it is the only option testable in
+Week 2 with a prompt and a folder of photographs. That argument survives. But the
+evidence supports a better reason, and the better reason implies a scope cut.
+
+**The model's weakness and the product's differentiator are in different places.**
+
+Where the VLM is bad is *metric and geometric*: Object Size Estimation 0.60–0.77
+against a 0.42 random baseline (§1.1); 3D pose IoU of 9.0 against a human 54.2
+(§1.2).
+
+What the differentiating feature needs is *semantic*. "Sit on the second step, look
+toward the water" requires knowing a step is there (Existence: 0.90–1.00, solved),
+that there is more than one, and where the water sits relative to it (Spatial
+Relation: 0.67–0.80, adequate). It does not require centimetres.
+
+Centimetres are required by exactly one subsystem: silhouette placement in §6. The
+whole scale chain — `H_REAL`, `px_per_metre`, `target_fig_px` — hangs off
+`support_height` and `support_bbox`, the two least reliable fields in the schema.
+
+So the design has coupled its riskiest dependency to its least differentiating
+feature. Every competitor in §2.4 already ships silhouette overlays. None of them
+can say "the second step."
+
+### 9.2 The scope cut
+
+Put the silhouette at a sensible default — centred, sized by `framing`, anchored
+around the lower third — and let the photographer drag it. §6.5 already specifies
+pan and pinch; §6.4 already concedes "the photographer can drag, and dragging is
+expected."
+
+What that buys:
+
+- §6 — 8 hours, and the doc's own "item most likely to overrun" — leaves v1.
+- The dependency on the model's weakest capability disappears.
+- §12's question "does the silhouette earn its place at all?" gets answered by
+  usage data instead of by 8 hours of projective geometry.
+- Options B, C, D and F stop being urgent, because what made measurement necessary
+  was the placement arithmetic, not the sentence.
+
+A then reduces to: one call, one image, three sentences, a generic draggable
+silhouette. Smaller than what the doc specifies, and it isolates the single bet that
+determines whether the product exists.
+
+### 9.3 What I would not build, and why
+
+| Option | Verdict |
+|---|---|
+| **F** (per-pixel depth) | Strongest on paper, and §3 argues for it. But it responds to a measurement nobody has taken. It also carries an unresolved conflict: ARCore depth needs camera *motion*, the scene lock fires on camera *stillness*. Do not buy that problem before you know you need it. |
+| **E** (on-device) | Best endgame profile — no calls, no bill, no signal needed, privacy in one sentence, and it keeps scene-specific language. Likely where this lands in 2027. But a ~3B on-device model, on a task where frontier models score near random on the relevant sub-skills, is not a Week-2 bet. Test it for an hour in Week 0; do not architect for it. |
+| **G** (detector supplies boxes) | The right upgrade *if* placement stays. Since placement leaves v1, so does G. |
+| **D**, **H** | Already shipped by at least three vendors (§2.4). A floor, not a destination. |
+| **B**, **C** | Superseded by F on the perception side; both inherit the same "responds to an untaken measurement" objection. |
+
+### 9.4 The honest counter-argument
+
+There is a real case against this. The three-card menu already absorbs bad cards —
+the doc's own scoring logic says a scene yielding one good card out of three is a
+scene the product handles fine. If a photographer discards "sit on that 20cm ledge"
+at a glance, metric error is cheap and I am over-weighting it.
+
+I think that is correct for the *sentence* and wrong for the *silhouette*. A badly
+placed overlay is visible on every card rather than discarded with one. Which is the
+same conclusion from the other direction.
+
+### 9.5 What would change my mind
+
+If the Week 0 tape-measure check (§6, recommendation 6) shows `support_height`
+classes are accurate — say >85% against measured ground truth on 20 objects — then
+metric perception is not the bottleneck, placement is cheap, and A-as-specified is
+fine with no scope cut. That check costs ten minutes and a tape measure and is the
+highest-information-per-minute item in the entire plan.
+
+---
+
+## 10. Drop-in replacement for §1 of the design document
+
+Written to be pasted over the existing §1. Corrects the depth premise, adds the four
+missing options, and states the recommendation.
+
+---
+
+### 1. Design options
+
+There are three jobs in this system, and every option below is a different answer to
+who does which.
+
+| Job | What it means |
+|---|---|
+| **Perception** | What is physically here, how big is it, how high, where's the light |
+| **Selection** | Given all that, which pose should the person strike |
+| **Language** | Write the sentence the photographer says out loud |
+
+The AI is unambiguously good at language, decent at selection, and weak at
+perception. That weakness is now measured rather than assumed, and it is narrower
+than it sounds. On *semantic* questions — is there a bench, is the water to the left
+— published benchmarks put frontier models at or near human level. On *metric*
+questions — how high is that, would a person fit — the same models sit barely above
+chance. Object size estimation scores 0.60–0.77 against a 0.42 random baseline.
+
+That split is the reason the options exist, and it also tells you which parts of this
+system are at risk. The sentence is semantic. The silhouette placement is metric.
+
+**A note on what the phone can measure.** An earlier draft of this document said the
+phone only finds flat surfaces, so a railing never appears. That is true of plane
+detection and false of what is actually available. ARCore's Depth API returns
+per-pixel depth, needs no time-of-flight sensor, works on non-planar and low-texture
+surfaces, and covered over 88% of active Android devices as of May 2026. Railings do
+appear. Two real limits remain: depth only becomes valid once the user has moved the
+device, and featureless surfaces like white walls still return imprecise values. On
+iOS the picture is worse, not better — LiDAR is Pro-only, and the monocular fallback
+for everything else is unproven for metric output.
+
+### The eight options
+
+| | Perception | Selection | Language | Calls while in use |
+|---|---|---|---|---|
+| **A** | AI estimates | AI | AI, written per scene | 1 |
+| **B** | Phone measures planes, AI interprets | AI | AI, written per scene | 1 |
+| **C** | Phone measures planes | Your rules | AI, written per scene | 1 |
+| **D** | Phone measures planes | Your rules | Pre-written, one per pose | 0 |
+| **E** | On-device model | On-device model | On-device, per scene | 0 |
+| **F** | Per-pixel depth, AI interprets | AI | AI, written per scene | 1 |
+| **G** | Detector supplies boxes, AI interprets | AI | AI, written per scene | 2 |
+| **H** | Scene embedding | Nearest neighbour | Pre-written, one per pose | 0 |
+
+---
+
+#### Option A — AI does everything
+
+Send one photograph, get back three poses with sentences. Nothing else runs.
+
+**Pros**
+- Simplest thing that could work. One call, no sensors, no rules to maintain.
+- Behaves identically on every phone, including old and low-end ones.
+- Handles anything in a scene, including things you never anticipated — a fire
+  escape, a stack of crates, a fallen tree.
+- Its strength is the differentiator. Naming what is actually here is the one thing
+  the shipped competition cannot do.
+
+**Cons**
+- It is guessing at size, and the benchmarks say this is the failure to expect most.
+- It is also guessing at where things are in the frame, which is what places the
+  silhouette.
+- Every recommendation needs signal. No signal, no cards.
+
+---
+
+#### Option B — Phone measures planes, AI does the rest
+
+As A, plus a line of measured flat surfaces in the request.
+
+**Pros**
+- Attacks the size failure directly. Still one call. Measuring is free.
+- Same code as A plus one line — testable in the same week without committing.
+
+**Cons**
+- The phone reports geometry, not meaning. A 44cm surface could be a step or a bin lid.
+- Planes miss railings, ledges and posts, which are among the better things to pose
+  against. **Option F fixes this and should be preferred.**
+- Needs visible surface detail and reasonable light.
+
+---
+
+#### Option C — Your rules pick the pose, AI writes the words
+
+**Pros**
+- When it picks wrong you can read your own rules and see why.
+- Selection is deterministic. The AI is confined to the job it is clearly good at.
+- Cheaper per call.
+
+**Cons**
+- You write and tune the rules, and they are rigid.
+- Inherits every blind spot of plane measurement.
+- Loses the AI's ability to notice something you never thought of.
+
+---
+
+#### Option D — No AI while you're using it
+
+**Pros**
+- Instant, free, works with no signal, nothing leaves the phone, least code.
+
+**Cons**
+- The sentence cannot mention where you actually are.
+- **This product already exists.** At least three apps ship silhouette overlays with
+  pre-written poses today. Choosing D means shipping into a solved category with no
+  differentiator. That is the decisive objection, and it is commercial rather than
+  technical.
+
+---
+
+#### Option E — Everything on the device
+
+A vision-capable on-device model does the scene reasoning and writes the sentence
+locally. Announced for iOS 27; Gemini Nano offers the equivalent on recent Android.
+
+**Pros**
+- Every operational advantage of D — instant, free, offline, private, no proxy, no
+  API key, no rate limiting, no provider retention policy — while *keeping*
+  scene-specific language.
+- The only option that is both cheap to run and differentiated.
+
+**Cons**
+- Quality is unmeasured and likely well below frontier, on a task where frontier is
+  already weak.
+- Recent OS floor, and two implementations, one per platform.
+- Not testable with a chat window. Needs a device harness.
+
+---
+
+#### Option F — Option B with real depth
+
+As B, but the measured surfaces come from per-pixel depth rather than plane anchors.
+
+**Pros**
+- Removes the railings-and-ledges blind spot that argues against B, C and D.
+- Gives real centimetres for the support-to-subject ratio, turning a guess squared
+  into a single guess.
+- Directly attacks the predicted dominant failure.
+
+**Cons**
+- **Depth needs camera motion; the scene lock fires on camera stillness.** That is a
+  genuine architectural conflict and needs prototyping before it is committed to.
+- Poor on featureless surfaces.
+- The iOS non-Pro path is unproven.
+
+---
+
+#### Option G — A detector supplies the coordinates
+
+Run an open-vocabulary detector first; hand the model a list of named, located
+objects and let it do selection and language only.
+
+**Pros**
+- Attacks the localisation weakness where it lives. Makes the box trustworthy, which
+  is what placement depends on.
+- Most of the grounding filter becomes unnecessary.
+
+**Cons**
+- A second model dependency on a deliberately simple stack. Adds latency.
+- A closed vocabulary loses the fire-escape-and-fallen-tree flexibility.
+
+---
+
+#### Option H — Retrieval instead of generation
+
+Embed the scene, nearest-neighbour against a library of scene-to-pose pairs, return
+the stored sentence.
+
+**Pros**
+- Zero calls, fully deterministic, auditable, no hallucination surface at all — you
+  can only return a pose someone actually photographed.
+- Improves as the library grows, which answers D's "no path to getting better".
+
+**Cons**
+- Needs a far larger library than 30.
+- Sentences stay generic, so it loses the differentiator the same way D does.
+
+---
+
+### What this document specifies
+
+**This document specifies Option A, with silhouette placement cut from v1**, and
+treats **F** as the expected upgrade if measurement turns out to be the bottleneck,
+and **E** as the expected upgrade if it does not.
+
+The reason is that the model's weakness and the product's differentiator sit in
+different places. The sentence is semantic and the model is good at that. The
+placement is metric and the model is bad at that. Cutting placement to a default
+position with drag-to-adjust removes the dependency on the weak capability, defers
+the eight riskiest hours in the build, and leaves the one bet that decides whether
+there is a product: does naming what is actually here beat a generic pose deck.
+
+Sections that change by option:
+
+| Section | A (as now specified) | E | F | D |
+|---|---|---|---|---|
+| §2 Client pipeline | as written | as written | add depth capture at lock | as written |
+| §4.2 Prompt | as written | shortened for a smaller model | add measured-surfaces line | not used |
+| §4.3 Filter | rules 4, 5, 7 only | same, on-device | rules 1, 2, 6 become checks against measurement | not used |
+| §6 Placement | **default position + drag** | same | full geometry becomes viable | same |
+| §3 Proxy | as written | **deleted entirely** | as written | **deleted entirely** |
+
+### How to choose
+
+Three decisions, all of which come out of work already planned.
+
+**Decision 0 — can it judge height at all?** Week 0. Photograph ten objects whose
+height you have measured with a tape. Check the returned height class against the
+tape. If it is right more than four times in five, placement is cheap and the scope
+cut above is unnecessary. Ten minutes, and it is the highest-information item in the
+whole plan.
+
+**Decision 1 — is perception the bottleneck?** Read the failure breakdown by class.
+If most bad cards are wrong about size or location, F is the move. If most are about
+pose choice or wording, measuring will not help.
+
+**Decision 2 — do scene-specific sentences beat generic ones?** This is the
+differentiator, not an optimisation. If generic sentences win or tie, the product is
+Option D, and Option D is a category with several incumbents and nothing to
+distinguish this entry. Treat a tie as a red flag rather than a simplification
+opportunity — and note that at 20 locations a tie cannot be distinguished from a
+30/70 loss, so the comparison needs more locations before it can carry this weight.
