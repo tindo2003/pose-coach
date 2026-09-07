@@ -812,7 +812,23 @@ The work deferred from Week 1. Trace each of the 30 photographs into an outline 
 
 The two tasks interleave well. Tracing is evening work for while the proxy is blocked on a response.
 
-**You now have:** an endpoint that returns three valid cards for any photograph including garbage, and 30 placeable assets.
+**You now have:** an endpoint that always returns three cards, and 30 placeable assets.
+
+**"Always" is the contract, and Week 4 is where you verify it.** The endpoint has no response that leaves the client with nothing to draw. Send it each of these with `curl` and confirm all of them come back with three cards:
+
+| Input | Why it happens in real use |
+|---|---|
+| A photo of the ground or the sky | Photographer hasn't raised the phone yet |
+| A wall filling the entire frame | Standing too close |
+| A near-black frame | Indoors, or dusk |
+| A motion-blurred frame | Stability detector fired on a bad frame |
+| A scene with nothing to sit or lean on | Not broken input — just an open field |
+| A 2-byte file, or a truncated JPEG | Network hiccup mid-upload |
+| A valid, well-composed scene | The normal case |
+
+Separately, the *model's* reply can be unusable even when the photo is fine — it names a bench that isn't there, returns coordinates outside the frame, picks the same pose three times, or writes a 40-word sentence. The seven filter rules in §4.3 drop those cards.
+
+In every one of these cases the proxy backfills from the three bundled fallback poses and still returns three. That is why the client has no empty state and no error branch for missing content: it draws what it is given.
 
 ---
 
